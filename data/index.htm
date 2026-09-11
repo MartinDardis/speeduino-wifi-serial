@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP32 Serial Bridge</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:system-ui,sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh;padding:1rem}
+h1{font-size:1.25rem;font-weight:700;color:#f8fafc}
+h2{font-size:.85rem;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:.75rem}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1rem;padding:.75rem 1rem;background:#1e2433;border-radius:.5rem;margin-bottom:1rem;border:1px solid #2d3748}
+.status-row{display:flex;flex-wrap:wrap;gap:.5rem;margin-left:auto}
+#net_state,#firmware_rev{font-size:.75rem;padding:.2rem .6rem;border-radius:999px;background:#2d3748;color:#94a3b8}
+#net_state{background:#1a3a2a;color:#4ade80}
+.card{background:#1e2433;border:1px solid #2d3748;border-radius:.5rem;padding:1rem;margin-bottom:.75rem}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:.6rem}
+.field{display:flex;flex-direction:column;gap:.25rem}
+label{font-size:.75rem;color:#94a3b8}
+input[type=text],input[type=number],input[type=password]{width:100%;padding:.4rem .6rem;background:#0f1117;border:1px solid #374151;border-radius:.375rem;color:#e2e8f0;font-size:.85rem}
+input:focus{outline:none;border-color:#3b82f6}
+.chk-row{display:flex;align-items:center;gap:.5rem;padding:.4rem 0;cursor:pointer}
+.chk-row input[type=checkbox]{width:1rem;height:1rem;cursor:pointer;accent-color:#3b82f6}
+.chk-row span{font-size:.82rem;color:#cbd5e1}
+table{width:100%;border-collapse:collapse;font-size:.82rem}
+th{text-align:left;padding:.4rem .5rem;color:#64748b;font-weight:600;border-bottom:1px solid #2d3748}
+td{padding:.35rem .5rem;border-bottom:1px solid #1a2130}
+td input{width:100%}
+td input[type=number]{width:5.5rem}
+td.narrow input{width:3.5rem}
+.bridge-wrap{overflow-x:auto}
+.bridge-table{width:auto}
+.bridge-table th,.bridge-table td{text-align:center;padding:.35rem .6rem}
+.bridge-table td input[type=checkbox]{width:1.1rem;height:1.1rem;accent-color:#3b82f6;cursor:pointer}
+.actions{display:flex;gap:.75rem;flex-wrap:wrap;margin-top:1rem}
+button{padding:.55rem 1.2rem;border:none;border-radius:.375rem;font-size:.85rem;font-weight:600;cursor:pointer;transition:opacity .15s}
+#btn-save{background:#3b82f6;color:#fff}
+#btn-save:hover{opacity:.85}
+#btn-restart{background:#374151;color:#e2e8f0}
+#btn-restart:hover{background:#dc2626;color:#fff}
+#btn-traffic,#btn-ota{background:#374151;color:#e2e8f0;padding:.55rem 1.2rem;border-radius:.375rem;font-size:.85rem;font-weight:600;text-decoration:none;display:inline-flex;align-items:center}
+#btn-traffic:hover{background:#1e3a5f;color:#93c5fd}
+#btn-ota:hover{background:#1a3a1a;color:#86efac}
+#toast{position:fixed;bottom:1.5rem;left:50%;transform:translateX(-50%) translateY(2rem);background:#1e2433;border:1px solid #3b82f6;color:#e2e8f0;padding:.6rem 1.2rem;border-radius:.5rem;font-size:.82rem;opacity:0;transition:opacity .3s,transform .3s;pointer-events:none;z-index:999}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.row-label{font-weight:600;color:#cbd5e1;font-size:.8rem}
+input:disabled{opacity:.35;cursor:not-allowed;border-color:#1f2937}
+tr.row-locked td{background:#1a1010}
+.lock-badge{font-size:.65rem;background:#7f1d1d;color:#fca5a5;padding:.1rem .35rem;border-radius:999px;margin-left:.4rem;vertical-align:middle}
+</style>
+</head>
+<body>
+
+<header>
+  <h1 id="headline">ESP32 Serial Bridge</h1>
+  <div class="status-row">
+    <span id="net_state">Loading...</span>
+    <span id="firmware_rev"></span>
+  </div>
+</header>
+
+<div class="card">
+  <h2>WiFi Settings</h2>
+  <div class="grid">
+    <div class="field"><label>Device Name</label><input type="text" id="receiverName"></div>
+    <div class="field"><label>WiFi SSID</label><input type="text" id="WiFi_ssid"></div>
+    <div class="field"><label>WiFi Password</label><input type="password" id="WiFi_pw" placeholder="leave blank to keep current"></div>
+    <div class="field"><label>AP Password</label><input type="text" id="AP_pw"></div>
+    <div class="field"><label>Search Time (s)</label><input type="number" id="iWiFiSearchTime" min="0"></div>
+    <div class="field"><label>TX Power (0-20)</label><input type="number" id="iWiFiTxPower" min="0" max="20"></div>
+  </div>
+  <label class="chk-row" style="margin-top:.6rem">
+    <input type="checkbox" id="bCloseAP">
+    <span>Close AP after WiFi connection</span>
+  </label>
+</div>
+
+<div class="card">
+  <h2>Serial Ports</h2>
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr>
+          <th>Port</th>
+          <th>Baudrate</th>
+          <th>Data bits</th>
+          <th>Stop bits</th>
+          <th>Parity</th>
+          <th>TCP Port</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr id="row-com0">
+          <td class="row-label" id="com0-label">COM0</td>
+          <td><input type="number" id="COM0Baudrate"></td>
+          <td class="narrow"><input type="number" id="COM0Data" min="5" max="8"></td>
+          <td class="narrow"><input type="number" id="COM0Stop" min="1" max="2"></td>
+          <td class="narrow"><input type="text" id="COM0Parity" maxlength="1" placeholder="N"></td>
+          <td><input type="number" id="TCPPort0"></td>
+        </tr>
+        <tr id="row-com1">
+          <td class="row-label" id="com1-label">COM1</td>
+          <td><input type="number" id="COM1Baudrate"></td>
+          <td class="narrow"><input type="number" id="COM1Data" min="5" max="8"></td>
+          <td class="narrow"><input type="number" id="COM1Stop" min="1" max="2"></td>
+          <td class="narrow"><input type="text" id="COM1Parity" maxlength="1" placeholder="N"></td>
+          <td><input type="number" id="TCPPort1"></td>
+        </tr>
+        <tr id="row-com2">
+          <td class="row-label" id="com2-label">COM2</td>
+          <td><input type="number" id="COM2Baudrate"></td>
+          <td class="narrow"><input type="number" id="COM2Data" min="5" max="8"></td>
+          <td class="narrow"><input type="number" id="COM2Stop" min="1" max="2"></td>
+          <td class="narrow"><input type="text" id="COM2Parity" maxlength="1" placeholder="N"></td>
+          <td><input type="number" id="TCPPort2"></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Cross-COM Bridging</h2>
+  <div class="bridge-wrap">
+    <table class="bridge-table">
+      <thead>
+        <tr><th></th><th>to COM0</th><th>to COM1</th><th>to COM2</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="row-label">from COM0</td>
+          <td><input type="checkbox" id="COM0xCOM0"></td>
+          <td><input type="checkbox" id="COM0xCOM1"></td>
+          <td><input type="checkbox" id="COM0xCOM2"></td>
+        </tr>
+        <tr>
+          <td class="row-label">from COM1</td>
+          <td><input type="checkbox" id="COM1xCOM0"></td>
+          <td><input type="checkbox" id="COM1xCOM1"></td>
+          <td><input type="checkbox" id="COM1xCOM2"></td>
+        </tr>
+        <tr>
+          <td class="row-label">from COM2</td>
+          <td><input type="checkbox" id="COM2xCOM0"></td>
+          <td><input type="checkbox" id="COM2xCOM1"></td>
+          <td><input type="checkbox" id="COM2xCOM2"></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card">
+  <h2>NMEA Filters</h2>
+  <div style="overflow-x:auto">
+    <table>
+      <thead>
+        <tr><th>Port</th><th>Pass (space-separated)</th><th>Block (space-separated)</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="row-label">COM0</td>
+          <td><input type="text" id="NMEAPass0" placeholder="e.g. GPGGA GPRMC"></td>
+          <td><input type="text" id="NMEABlock0" placeholder="e.g. GPGSV"></td>
+        </tr>
+        <tr>
+          <td class="row-label">COM1</td>
+          <td><input type="text" id="NMEAPass1" placeholder="e.g. GPGGA GPRMC"></td>
+          <td><input type="text" id="NMEABlock1" placeholder="e.g. GPGSV"></td>
+        </tr>
+        <tr>
+          <td class="row-label">COM2</td>
+          <td><input type="text" id="NMEAPass2" placeholder="e.g. GPGGA GPRMC"></td>
+          <td><input type="text" id="NMEABlock2" placeholder="e.g. GPGSV"></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="actions">
+  <button id="btn-save" onclick="saveSettings()">Save Settings</button>
+  <button id="btn-restart" onclick="restartDevice()">Restart Device</button>
+  <a href="/traffic.htm" id="btn-traffic">Traffic Monitor</a>
+  <a href="/update" id="btn-ota">Firmware / SPIFFS Update</a>
+</div>
+
+<div id="toast"></div>
+
+<script>
+function parseData(text) {
+  text.trim().split('\n').forEach(function(line) {
+    var parts = line.split('|');
+    if (parts.length < 3) return;
+    var id = parts[0], value = parts[1], type = parts[2];
+    if (type === 'busy') { setPortLock(id, value === '1'); return; }
+    var el = document.getElementById(id);
+    if (!el) return;
+    if (type === 'input') el.value = value;
+    else if (type === 'chk') el.checked = (value === 'checked');
+    else if (type === 'div') el.textContent = value;
+  });
+}
+
+function setPortLock(portId, locked) {
+  var n = portId.replace('port', '').replace('_busy', '');
+  ['COM'+n+'Baudrate','COM'+n+'Data','COM'+n+'Stop','COM'+n+'Parity','TCPPort'+n].forEach(function(fid) {
+    var el = document.getElementById(fid);
+    if (el) el.disabled = locked;
+  });
+  var row = document.getElementById('row-com'+n);
+  if (row) row.classList.toggle('row-locked', locked);
+  var lbl = document.getElementById('com'+n+'-label');
+  if (lbl) lbl.innerHTML = 'COM'+n + (locked ? ' <span class="lock-badge">&#9679; live</span>' : '');
+}
+
+function loadData() {
+  fetch('/loadRootData')
+    .then(function(r) { return r.text(); })
+    .then(function(text) { parseData(text); loadState(); })
+    .catch(function(e) { console.error('Load failed:', e); });
+}
+
+function loadState() {
+  fetch('/loadRootState')
+    .then(function(r) { return r.text(); })
+    .then(parseData)
+    .catch(function() {});
+}
+
+function saveSettings() {
+  var btn = document.getElementById('btn-save');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+
+  var getParams = new URLSearchParams();
+  getParams.append('bCloseAP', document.getElementById('bCloseAP').checked ? '1' : '0');
+  ['0','1','2'].forEach(function(n) {
+    var locked = document.getElementById('COM'+n+'Baudrate').disabled;
+    if (!locked) {
+      getParams.append('COM'+n+'Baudrate', document.getElementById('COM'+n+'Baudrate').value);
+      getParams.append('COM'+n+'Data',     document.getElementById('COM'+n+'Data').value);
+      getParams.append('COM'+n+'Stop',     document.getElementById('COM'+n+'Stop').value);
+      getParams.append('COM'+n+'Parity',   document.getElementById('COM'+n+'Parity').value);
+    }
+    ['0','1','2'].forEach(function(x) {
+      var cb = document.getElementById('COM'+n+'xCOM'+x);
+      getParams.append('COM'+n+'xCOM'+x, cb && cb.checked ? '1' : '0');
+    });
+  });
+
+  var body = new URLSearchParams();
+  body.append('receiverName',    document.getElementById('receiverName').value);
+  body.append('WiFi_ssid',       document.getElementById('WiFi_ssid').value);
+  var pw = document.getElementById('WiFi_pw').value;
+  body.append('WiFi_pw', pw.length > 0 ? pw : '********');
+  body.append('AP_pw',           document.getElementById('AP_pw').value);
+  body.append('iWiFiSearchTime', document.getElementById('iWiFiSearchTime').value);
+  body.append('iWiFiTxPower',    document.getElementById('iWiFiTxPower').value);
+  ['0','1','2'].forEach(function(n) {
+    if (!document.getElementById('TCPPort'+n).disabled)
+      body.append('TCPPort'+n, document.getElementById('TCPPort'+n).value);
+    body.append('NMEAPass'+n,  document.getElementById('NMEAPass'+n).value);
+    body.append('NMEABlock'+n, document.getElementById('NMEABlock'+n).value);
+  });
+
+  fetch('/set?' + getParams.toString(), {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: body.toString()
+  })
+  .then(function(r) { return r.text(); })
+  .then(function(msg) { showToast(msg); })
+  .catch(function(e) { showToast('Error: ' + e); })
+  .finally(function() {
+    btn.disabled = false;
+    btn.textContent = 'Save Settings';
+  });
+}
+
+function restartDevice() {
+  if (!confirm('Restart the device?')) return;
+  fetch('/restart', { method: 'POST' })
+    .catch(function() {})
+    .finally(function() {
+      window.location.href = '/restart.htm';
+    });
+}
+
+function showToast(msg) {
+  var t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(function() { t.classList.remove('show'); }, 3500);
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+  loadData();
+  setInterval(loadState, 5000);
+});
+</script>
+</body>
+</html>

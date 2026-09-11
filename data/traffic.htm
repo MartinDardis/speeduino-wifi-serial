@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Traffic Monitor — ESP32 Serial Bridge</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'SF Mono',ui-monospace,'Cascadia Code',monospace;background:#0d0d0d;color:#c8c8c8;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+
+header{display:flex;flex-wrap:wrap;align-items:center;gap:.5rem .75rem;padding:.6rem .9rem;background:#141414;border-bottom:1px solid #1f2937;flex-shrink:0}
+.back{color:#4b5563;text-decoration:none;font-size:.85rem;margin-right:.1rem}
+.back:hover{color:#9ca3af}
+h1{font-size:.95rem;font-weight:700;color:#e5e7eb;letter-spacing:.04em}
+
+.controls{display:flex;flex-wrap:wrap;align-items:center;gap:.4rem;margin-left:auto}
+
+select{padding:.28rem .55rem;background:#0d0d0d;border:1px solid #1f2937;border-radius:.3rem;color:#9ca3af;font-family:inherit;font-size:.78rem;cursor:pointer}
+select:focus{outline:none;border-color:#374151}
+
+label.cb-label{display:flex;align-items:center;gap:.35rem;font-size:.78rem;color:#6b7280;cursor:pointer;user-select:none;white-space:nowrap}
+label.cb-label input[type=checkbox]{accent-color:#3b82f6;width:13px;height:13px;cursor:pointer}
+label.cb-label:hover{color:#9ca3af}
+
+button{padding:.28rem .75rem;border:none;border-radius:.3rem;font-family:inherit;font-size:.78rem;font-weight:600;cursor:pointer;transition:opacity .15s,background .15s}
+#btn-pause{background:#1d4ed8;color:#eff6ff}
+#btn-pause:hover{opacity:.85}
+#btn-pause.paused{background:#b45309;color:#fefce8}
+#btn-clear{background:#1c1c1c;color:#9ca3af;border:1px solid #1f2937}
+#btn-clear:hover{background:#262626}
+#btn-dl{background:#1c1c1c;color:#9ca3af;border:1px solid #1f2937}
+#btn-dl:hover{background:#262626;color:#d1d5db}
+
+.ws-badge{font-size:.72rem;padding:.18rem .5rem;border-radius:999px;background:#1c1c1c;color:#4b5563;border:1px solid #1f2937;user-select:none;white-space:nowrap}
+.ws-badge.connected{background:#052e16;color:#4ade80;border-color:#166534}
+.ws-badge.error{background:#2d0f0f;color:#f87171;border-color:#7f1d1d}
+
+#terminal{flex:1;overflow-y:auto;padding:.5rem .7rem;background:#0d0d0d;scrollbar-width:thin;scrollbar-color:#1f2937 transparent}
+#terminal::-webkit-scrollbar{width:6px}
+#terminal::-webkit-scrollbar-track{background:transparent}
+#terminal::-webkit-scrollbar-thumb{background:#1f2937;border-radius:3px}
+
+.line{font-size:.77rem;line-height:1.7;white-space:pre;color:#6b7280}
+.line .ts{color:#374151}
+.line .dir-t2c{color:#3b82f6}
+.line .dir-c2t{color:#22c55e}
+.line .blen{color:#374151}
+.line .hex{color:#c8c8c8}
+
+#empty{display:flex;align-items:center;justify-content:center;height:100%;color:#1f2937;font-size:.85rem;letter-spacing:.05em}
+</style>
+</head>
+<body>
+
+<header>
+  <a href="/" class="back">&#8592;</a>
+  <h1>Traffic Monitor</h1>
+  <div class="controls">
+    <select id="filter">
+      <option value="">All COMs</option>
+      <option value="0">COM0</option>
+      <option value="1">COM1</option>
+      <option value="2">COM2</option>
+    </select>
+    <label class="cb-label">
+      <input type="checkbox" id="cb-scroll" checked> Auto-scroll
+    </label>
+    <button id="btn-pause" onclick="togglePause()">&#9646;&#9646; Pause</button>
+    <button id="btn-clear" onclick="clearLog()">Clear</button>
+    <button id="btn-dl" onclick="downloadLog()">&#8595; .txt</button>
+    <span id="ws-badge" class="ws-badge">Connecting…</span>
+  </div>
+</header>
+
+<div id="terminal"><div id="empty">Waiting for traffic…</div></div>
+
+<script>
+var MAX_ROWS = 500;
+var paused = false;
+var ws = null;
+var reconnectTimer = null;
+var logBuffer = [];
+
+var terminal = document.getElementById('terminal');
+var empty = document.getElementById('empty');
+var badge = document.getElementById('ws-badge');
+var filter = document.getElementById('filter');
+var cbScroll = document.getElementById('cb-scroll');
+var btnPause = document.getElementById('btn-pause');
+
+function atBottom() {
+  return terminal.scrollHeight - terminal.scrollTop - terminal.clientHeight < 50;
+}
+
+function scrollIfAuto() {
+  if (cbScroll.checked) terminal.scrollTop = terminal.scrollHeight;
+}
+
+function connect() {
+  var proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(proto + '://' + location.host + '/ws/traffic');
+
+  ws.onopen = function() {
+    badge.textContent = 'Live';
+    badge.className = 'ws-badge connected';
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  };
+
+  ws.onclose = function() {
+    badge.textContent = 'Disconnected';
+    badge.className = 'ws-badge error';
+    reconnectTimer = setTimeout(connect, 1500);
+  };
+
+  ws.onerror = function() {
+    badge.textContent = 'Error';
+    badge.className = 'ws-badge error';
+  };
+
+  ws.onmessage = function(ev) {
+    if (paused) return;
+    var data;
+    try { data = JSON.parse(ev.data); } catch(e) { return; }
+    var comFilter = filter.value;
+    if (comFilter !== '') {
+      var m = data.d.match(/COM(\d)/);
+      if (!m || m[1] !== comFilter) return;
+    }
+    addLine(data);
+  };
+}
+
+function pad2(n) { return String(n).padStart(2, '0'); }
+function pad3(n) { return String(n).padStart(3, '0'); }
+function padN(s, n) { return String(s).padStart(n, ' '); }
+
+function formatTime(ms) {
+  var t = new Date(ms);
+  return pad2(t.getUTCHours()) + ':' + pad2(t.getUTCMinutes()) + ':' +
+         pad2(t.getUTCSeconds()) + '.' + pad3(t.getUTCMilliseconds());
+}
+
+function isTcpToCom(d) { return /TCP.*COM/.test(d); }
+
+function addLine(data) {
+  if (empty) { empty.style.display = 'none'; }
+
+  var lines = terminal.querySelectorAll('.line');
+  if (lines.length >= MAX_ROWS) lines[0].remove();
+
+  var ts = formatTime(data.t);
+  var isT2C = isTcpToCom(data.d);
+  var dir = padN(data.d, 12);
+  var blen = '[' + padN(data.l + 'B', 5) + ']';
+
+  var div = document.createElement('div');
+  div.className = 'line';
+
+  var tsSpan = document.createElement('span');
+  tsSpan.className = 'ts';
+  tsSpan.textContent = ts + '  ';
+
+  var dirSpan = document.createElement('span');
+  dirSpan.className = isT2C ? 'dir-t2c' : 'dir-c2t';
+  dirSpan.textContent = dir + '  ';
+
+  var blenSpan = document.createElement('span');
+  blenSpan.className = 'blen';
+  blenSpan.textContent = blen + '  ';
+
+  var hexSpan = document.createElement('span');
+  hexSpan.className = 'hex';
+  hexSpan.textContent = data.h;
+
+  div.appendChild(tsSpan);
+  div.appendChild(dirSpan);
+  div.appendChild(blenSpan);
+  div.appendChild(hexSpan);
+  terminal.appendChild(div);
+
+  logBuffer.push({ t: ts, d: data.d, l: data.l, h: data.h });
+  if (logBuffer.length > MAX_ROWS) logBuffer.shift();
+
+  scrollIfAuto();
+}
+
+function togglePause() {
+  paused = !paused;
+  btnPause.innerHTML = paused ? '&#9654; Resume' : '&#9646;&#9646; Pause';
+  btnPause.classList.toggle('paused', paused);
+}
+
+function clearLog() {
+  terminal.querySelectorAll('.line').forEach(function(e) { e.remove(); });
+  logBuffer = [];
+  empty.style.display = '';
+}
+
+function downloadLog() {
+  if (logBuffer.length === 0) return;
+  var lines = logBuffer.map(function(r) {
+    return r.t + '  ' + padN(r.d, 12) + '  [' + padN(r.l + 'B', 5) + ']  ' + r.h;
+  });
+  var blob = new Blob([lines.join('\n') + '\n'], { type: 'text/plain' });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement('a');
+  a.href = url;
+  a.download = 'traffic_' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19) + '.txt';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+connect();
+</script>
+</body>
+</html>
